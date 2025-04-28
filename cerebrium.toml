@@ -1,0 +1,41 @@
+[cerebrium.build]
+predict_data = "{\"pdf_data\": \"JVBERi0xLjQKJeLjz9MKMyAwIG9iago8PC9UeXBlL1hPYmplY3QvU3VidHlwZS9JbWFnZS9XaWR0aCAxMDkwL0hlaWdodCA0NTAvQml0c1BlckNvbXBvbmVudCA4L0NvbG9yU3BhY2UvRGV2aWNlUkdCL0ZpbHRlci9GbGF0ZURlY29kZS9MZW5ndGggMjI5Pj4Kc3RyZWFtCnic7cExAQAAAMKg9U9tDQ+gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4G0qUAABCmVuZHN0cmVhbQplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDEgMCBSL01lZGlhQm94WzAgMCA2MTIgNzkyXS9Db250ZW50cyA0IDAgUi9SZXNvdXJjZXM8PC9YT2JqZWN0PDwvSW0zIDMgMCBSPj4vUHJvY1NldFsvUERGL1RleHQvSW1hZ2VCXS9Gb250PDwvRjEgNSAwIFI+Pj4+Pj4KZW5kb2JqCjQgMCBvYmoKPDwvTGVuZ3RoIDk3Pj4Kc3RyZWFtCnEKNDU0IDAgMAo5MCAxOTYgcmUKVwpuCkJUCi9GMSAxOCBUZgoxMDAgMTAwIFRkCihUaGlzIGlzIGEgc2FtcGxlIHRlc3QgZG9jdW1lbnQgZm9yIG9sbW9jci4pVGoKRVQKUQoKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8L1R5cGUvRm9udC9TdWJ0eXBlL1R5cGUxL0Jhc2VGb250L0hlbHZldGljYS1Cb2xkPj4KZW5kb2JqCjEgMCBvYmoKPDwvVHlwZS9QYWdlcy9Db3VudCAxL0tpZHNbMiAwIFJdPj4KZW5kb2JqCjYgMCBvYmoKPDwvVHlwZS9DYXRhbG9nL1BhZ2VzIDEgMCBSPj4KZW5kb2JqCjcgMCBvYmoKPDwvUHJvZHVjZXIoaVRleHQgMi4wLjcgYnkgMVQzWFQpCi9Nb2REYXRlKEQ6MjAyMzA1MjMxNTEyMDErMDInMDAnKQovQ3JlYXRpb25EYXRlKEQ6MjAyMzA1MjMxNTEyMDErMDInMDAnKT4+CmVuZG9iagp4cmVmCjAgOAowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDA1NTUgMDAwMDAgbiAKMDAwMDAwMDMxMSAwMDAwMCBuIAowMDAwMDAwMDE1IDAwMDAwIG4gCjAwMDAwMDA0NTAgMDAwMDAgbiAKMDAwMDAwMDU5NiAwMDAwMCBuIAowMDAwMDAwNjA1IDAwMDAwIG4gCjAwMDAwMDA2NDUgMDAwMDAgbiAKdHJhaWxlcgo8PC9TaXplIDgvUm9vdCA2IDAgUi9JbmZvIDcgMCBSL0lEIFs8NTUxZWVmMGYwZDgyYWI1OWIyY2UyYmVkNWI4ZDNhMGM+PDU1MWVlZjBmMGQ4MmFiNTliMmNlMmJlZDViOGQzYTBjPl0+PgolU3RhcnRYUmVmCjc1NwolJUVPRgo=\"}"
+hide_public_endpoint = false
+disable_animation = false
+disable_build_logs = false
+disable_syntax_check = false
+disable_predict = false
+log_level = "INFO"
+disable_confirmation = false
+
+[cerebrium.deployment]
+name = "1-test"
+python_version = "3.11"
+include = ["docs", "olmocr", "scripts", "tests", "cerebrium.toml", "main.py", "pyproject.toml", "requirements.txt"]
+exclude = ["venv"]
+docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
+shell_commands = ["ls", "pip install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/"]
+
+[cerebrium.hardware]
+region = "us-east-1"
+provider = "aws"
+compute = "AMPERE_A10"
+cpu = 2
+memory = 16.0
+gpu_count = 1
+
+[cerebrium.scaling]
+min_replicas = 0
+max_replicas = 5
+cooldown = 60
+
+[cerebrium.dependencies.conda]
+
+[cerebrium.dependencies.apt]
+poppler-utils = "latest"
+ttf-mscorefonts-installer = "latest"
+msttcorefonts = "latest"
+fonts-crosextra-caladea = "latest"
+fonts-crosextra-carlito = "latest"
+gsfonts = "latest"
+lcdf-typetools = "latest"
