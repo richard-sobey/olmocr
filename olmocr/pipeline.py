@@ -76,8 +76,18 @@ sglang_logger.addHandler(file_handler)
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # Global s3 clients fo the whole script, we have two separate ones in case your workspace and your pdfs are in different accounts
-workspace_s3 = boto3.client("s3")
-pdf_s3 = boto3.client("s3")
+workspace_s3 = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION')
+)
+pdf_s3 = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION')
+)
 
 # Global variables for token statistics
 metrics = MetricsKeeper(window=60 * 5)

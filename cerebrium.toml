@@ -11,8 +11,8 @@ disable_confirmation = false
 [cerebrium.deployment]
 name = "1-test"
 python_version = "3.11"
-include = ["docs", "olmocr", "scripts", "tests", "cerebrium.toml", "main.py", "pyproject.toml", "requirements.txt"]
-exclude = ["venv"]
+include = ["docs/*", "olmocr/*", "scripts/*", "cerebrium.toml", "main.py", "pyproject.toml", "requirements.txt"]
+exclude = ["venv/*", ".env"]
 docker_base_image_url = "nvidia/cuda:12.1.1-runtime-ubuntu22.04"
 shell_commands = ["ls", "pip install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/"]
 
@@ -21,7 +21,7 @@ region = "us-east-1"
 provider = "aws"
 compute = "AMPERE_A10"
 cpu = 2
-memory = 16.0
+memory = 32.0
 gpu_count = 1
 
 [cerebrium.scaling]
