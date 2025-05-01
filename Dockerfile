@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install Python dependencies including runpod and GPU extras
-COPY requirements.txt .
-RUN pip3 install --upgrade pip \
-    && pip3 install runpod \
-    && pip3 install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/ \
-    && pip3 install runpod
+COPY requirements.txt pyproject.toml ./
+RUN pip install --upgrade pip \
+    && pip install runpod \
+    && pip install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/ \
+    && pip install runpod
 
 # Copy the rest of the application code
 COPY . .
