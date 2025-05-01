@@ -67,7 +67,7 @@ def process_pdf(inp_data, out_data=None) -> str:
         else:
             pdf_path = inp_data
 
-        cmd = ["python", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
+        cmd = ["/root/miniconda3/envs/olmocr/bin/python", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
         subprocess.run(cmd, check=True)
         return json.dumps({"status": "success", "s3_output": workspace})
 
