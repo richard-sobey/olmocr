@@ -1,5 +1,4 @@
-FROM runpod/worker-sglang:latest
-
+FROM runpod/worker-sglang:v0.4.1stable
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
     poppler-utils \
