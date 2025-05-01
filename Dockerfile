@@ -8,20 +8,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-crosextra-caladea \
     fonts-crosextra-carlito \
     gsfonts \
-    lcdf-typetools \
-    && rm -rf /var/lib/apt/lists/*
+    lcdf-typetools
 
 WORKDIR /app
 
 # Install Python dependencies including runpod and GPU extras
 COPY requirements.txt pyproject.toml ./
-RUN pip install --upgrade pip \
-    && pip install runpod \
-    && pip install -e .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/ \
-    && pip install runpod
+
+RUN mkdir -p ~/miniconda3 && \
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh && \
+    bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 && \
+    rm ~/miniconda3/miniconda.sh
+
+RUN pip install runpod
 
 # Copy the rest of the application code
 COPY . .
 
 # Start the RunPod serverless worker
-CMD ["python3", "-u", "main_runpod.py"]
+CMD ["python", "main_runpod.py"]
