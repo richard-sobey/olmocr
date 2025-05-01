@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM runpod/worker-sglang:latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip \
