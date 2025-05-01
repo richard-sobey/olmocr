@@ -38,4 +38,4 @@ RUN pip install .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/fla
     pip install runpod
 
 # Start the RunPod serverless worker
-CMD ["bash", "--login", "-c", "conda activate olmocr && python main_runpod.py"]
+CMD ["bash", "--login", "-c", "~/miniconda3/bin/conda activate olmocr && python main_runpod.py"]
