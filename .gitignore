@@ -80,3 +80,4 @@ docs/build
 site/
 venv/
 .env
+notebooks/*
