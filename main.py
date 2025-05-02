@@ -67,7 +67,7 @@ def process_pdf(inp_data, out_data=None) -> str:
         else:
             pdf_path = inp_data
 
-        cmd = ["/root/miniconda3/envs/olmocr/bin/python", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
+        cmd = ["python3", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
         subprocess.run(cmd, check=True)
         return json.dumps({"status": "success", "s3_output": workspace})
 
@@ -89,7 +89,7 @@ def process_pdf(inp_data, out_data=None) -> str:
             raise ValueError("Input data must be a base64-encoded PDF string or an S3 path")
 
         logger.info("Running OCR pipeline")
-        cmd = ["/root/miniconda3/envs/olmocr/bin/python", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
+        cmd = ["python3", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
         subprocess.run(cmd, check=True)
 
         # Collect and return results
