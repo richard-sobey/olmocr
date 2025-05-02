@@ -27,7 +27,8 @@ RUN ~/miniconda3/bin/conda create -n olmocr python=3.11 -y
 
 # Install Python dependencies in the conda environment
 RUN ~/miniconda3/envs/olmocr/bin/pip install .[gpu] --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/ && \
-    ~/miniconda3/envs/olmocr/bin/pip install runpod
+~/miniconda3/envs/olmocr/bin/pip install sglang[all]==0.4.2 sgl-kernel==0.0.3.post1 && \    
+~/miniconda3/envs/olmocr/bin/pip install runpod
 
 # Start the RunPod serverless worker
 CMD ["/root/miniconda3/envs/olmocr/bin/python", "main_runpod.py"]
