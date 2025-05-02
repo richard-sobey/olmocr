@@ -39,11 +39,13 @@ RUN /root/.local/bin/uv pip install --system --no-cache -e .
 
 RUN /root/.local/bin/uv pip install --system --no-cache sgl-kernel==0.0.3.post1 --force-reinstall --no-deps
 RUN /root/.local/bin/uv pip install --system --no-cache "sglang[all]==0.4.2" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+RUN /root/.local/bin/uv pip install --system --no-cache runpod
 
 COPY olmocr olmocr
+COPY main.py main.py
+COPY main_runpod.py main_runpod.py
 
 WORKDIR /root
-COPY olmocr olmocr
 
 RUN python3 -m sglang.launch_server --help
 RUN python3 -m olmocr.pipeline --help
