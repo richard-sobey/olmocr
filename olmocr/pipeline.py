@@ -530,7 +530,7 @@ async def sglang_server_task(args, semaphore):
     mem_fraction_arg = ["--mem-fraction-static", "0.80"] if gpu_memory < 60 else []
 
     cmd = [
-        "python3",
+        "/root/miniconda3/envs/olmocr/bin/python",#"python3",
         "-m",
         "sglang.launch_server",
         "--model-path",
