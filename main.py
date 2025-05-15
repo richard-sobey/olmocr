@@ -1,104 +1,127 @@
-import os
 import logging
-import subprocess
-import tempfile
-import json
-import glob
-import base64
-import binascii
+from pathlib import Path
+import uuid, os, asyncio, tempfile, json
+from pypdf import PdfReader
+import uvicorn
+from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.INFO)
+from fastapi import FastAPI, UploadFile, BackgroundTasks, Depends
+from fastapi.responses import JSONResponse
+import runpod
+import boto3
+
+from auth import validate_api_key
+from olmocr.pipeline import build_page_query
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
+load_dotenv()
 
-def is_base64(s: str) -> bool:
+RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID")
+RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
+S3_BUCKET = "ocrolm"
 
-    stripped = ''.join(s.split())
+runpod.api_key = RUNPOD_API_KEY
+endpoint = runpod.Endpoint(RUNPOD_ENDPOINT)
 
-    # Base64 strings must have a length that’s a multiple of 4
-    if len(stripped) % 4:
-        return False
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION')
+)
 
-    try:
-        # Try to decode; validate by round-trip re-encoding
-        decoded = base64.b64decode(stripped, validate=True)
-        reencoded = base64.b64encode(decoded).decode('ascii')
-        return reencoded == stripped
-    except (ValueError, binascii.Error):
-        return False
+app = FastAPI(title="OCR Pipeline API")
 
-
-def process_pdf(inp_data, out_data=None) -> str:
-    """
-    Process PDF data using olmOCR and return the JSON results.
+@app.post("/ocr", status_code=202, dependencies=[Depends(validate_api_key)])
+async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
     
-    Args:
-        inp_data: Base64-encoded PDF string OR S3 path
-        out_data: None OR S3 path
-        
-    Returns:
-        str: The extracted text as JSON string
-    """
-    logger.info("Processing PDF data")
+    job_id = uuid.uuid4().hex
+    
+    logger.info(f"Received OCR request for {len(pdfs)} documents")
 
-    # Determine input/output types
-    is_s3_input = inp_data.startswith("s3://")
-    is_base64_input = is_base64(inp_data)
-    is_s3_output = out_data is not None
+    manifest = {
+        "job_id": job_id,
+        "documents": [],
+        "output_format": "jsonl",
+        "webhook_url": webhook_url,
+    }
 
-    # Validate parameters
-    if not (is_s3_input or is_base64_input):
-        raise ValueError("Input data must be a base64-encoded PDF string or an S3 path")
-    if is_s3_output and not out_data.startswith("s3://"):
-        raise ValueError("Output data must be an S3 path")
-
-    # Asynchronous processing for S3 output
-    if is_s3_output:
-        workspace = out_data
-        # Prepare PDF path (local file for base64, S3 path otherwise)
-        if is_base64_input:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-            try:
-                tmp.write(base64.b64decode(inp_data))
-                tmp.flush()
-                pdf_path = tmp.name
-            finally:
-                tmp.close()
-        else:
-            pdf_path = inp_data
-
-        cmd = ["python3", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
-        subprocess.run(cmd, check=True)
-        return json.dumps({"status": "success", "s3_output": workspace})
-
-    # Synchronous processing for local output
-    with tempfile.TemporaryDirectory() as workspace:
-        # Prepare PDF path (base64 decode or S3 path)
-        if is_base64_input:
-            try:
-                pdf_bytes = base64.b64decode(inp_data)
-            except Exception as e:
-                raise ValueError(f"Failed to decode base64 PDF data: {e}")
-            pdf_path = os.path.join(workspace, "input.pdf")
+    # temporary workspace for image conversion
+    with tempfile.TemporaryDirectory() as td:
+        for pdf_file in pdfs:
+            data = await pdf_file.read()
+            doc_id = Path(pdf_file.filename).stem or uuid.uuid4().hex
+            
+            # Save PDF to temp dir
+            pdf_path = Path(td) / f"{doc_id}.pdf"
             with open(pdf_path, "wb") as f:
-                f.write(pdf_bytes)
-            logger.info("PDF written to file")
-        elif is_s3_input:
-            pdf_path = inp_data
-        else:
-            raise ValueError("Input data must be a base64-encoded PDF string or an S3 path")
+                f.write(data)
+            
+            # Get page count
+            try:
+                reader = PdfReader(pdf_path)
+                page_count = reader.get_num_pages()
+            except Exception as e:
+                logger.error(f"Error counting pages for {pdf_path}: {e}")
+                return JSONResponse({"error": f"Could not count number of pages for {pdf_path}, aborting document"}, status_code=500)
+            
+            # Process each page with build_page_query
+            page_queries = []
+            page_tasks = []
+            
+            async with asyncio.TaskGroup() as tg:
+                for page_num in range(page_count):
+                    # Create a task for processing each page in parallel
+                    task = tg.create_task(
+                        process_page(pdf_path, page_num + 1, job_id, doc_id, S3_BUCKET)
+                    )
+                    page_tasks.append(task)
+            
+            # Collect results from all tasks
+            page_queries = [task.result() for task in page_tasks]
+            
+            manifest["documents"].append({
+                "doc_id": doc_id,
+                "pages": page_count,
+                "page_queries": [f"s3://{S3_BUCKET}/{key}" for key in page_queries],
+            })
 
-        logger.info("Running OCR pipeline")
-        cmd = ["python3", "-m", "olmocr.pipeline", workspace, "--pdfs", pdf_path]
-        subprocess.run(cmd, check=True)
+    # enqueue RunPod serverless job (non-blocking)
+    # background_tasks.add_task(endpoint.run, input=manifest)
+    return JSONResponse({"job_id": job_id})
 
-        # Collect and return results
-        results = []
-        for result_file in glob.glob(os.path.join(workspace, "results", "output_*.jsonl")):
-            with open(result_file, "r") as f:
-                for line in f:
-                    if line.strip():
-                        results.append(json.loads(line))
+@app.get("/status/{job_id}")
+async def status(job_id: str):
+    """Dummy status endpoint – real implementation could query DynamoDB or S3."""
+    return {"job_id": job_id, "status": "processing"}
 
-        logger.info("Results read")
-        return json.dumps(results)
+# Add this helper function for processing a single page
+async def process_page(pdf_path, page_num, job_id, doc_id, bucket):
+    # Configure parameters
+    target_longest_image_dim = 1024
+    target_anchor_text_len = 500
+    
+    # Build page query
+    query = await build_page_query(
+        str(pdf_path), 
+        page_num, 
+        target_longest_image_dim, 
+        target_anchor_text_len
+    )
+    
+    # Store the complete query result in S3
+    query_key = f"jobs/{job_id}/queries/{doc_id}/page_{page_num:04}.json"
+    s3.put_object(
+        Bucket=bucket, 
+        Key=query_key, 
+        Body=json.dumps(query).encode(),
+        ContentType="application/json"
+    )
+    
+    logger.info(f"Processed {doc_id} page {page_num}")
+    return query_key
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

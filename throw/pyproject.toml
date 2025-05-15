@@ -86,12 +86,12 @@ bench = [
     "rapidfuzz",
     "sequence_align",
     "syntok",
-    "openai",
     "google-genai",
     "playwright",
     "mistralai",
     "lxml",
     "flask",
+
 ]
 
 train = [

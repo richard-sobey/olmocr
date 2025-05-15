@@ -23,9 +23,7 @@ from urllib.parse import urlparse
 
 import boto3
 import httpx
-import torch
 from botocore.exceptions import ClientError
-from huggingface_hub import snapshot_download
 from PIL import Image
 from pypdf import PdfReader
 from tqdm import tqdm
@@ -508,6 +506,7 @@ async def worker(args, work_queue: WorkQueue, semaphore, worker_id):
 
 async def sglang_server_task(args, semaphore):
     model_name_or_path = args.model
+    import torch
 
     # if "://" in model_name_or_path:
     #     # TODO, Fix this code so that we support the multiple s3/weka paths, or else remove it
@@ -673,6 +672,7 @@ async def sglang_server_ready():
 
 async def download_model(model_name_or_path: str):
     logger.info(f"Downloading model '{model_name_or_path}'")
+    from huggingface_hub import snapshot_download
     snapshot_download(repo_id=model_name_or_path)
     logger.info(f"Model download complete '{model_name_or_path}'")
 
