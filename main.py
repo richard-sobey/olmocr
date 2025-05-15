@@ -21,6 +21,7 @@ load_dotenv()
 RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 S3_BUCKET = "ocrolm"
+MAX_CONCURRENT_TASKS = 50
 
 runpod.api_key = RUNPOD_API_KEY
 endpoint = runpod.Endpoint(RUNPOD_ENDPOINT)
@@ -47,6 +48,9 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
         "output_format": "jsonl",
         "webhook_url": webhook_url,
     }
+
+    # Create a semaphore to limit concurrency to 20 tasks
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
     # temporary workspace for image conversion
     with tempfile.TemporaryDirectory() as td:
@@ -75,7 +79,7 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
                 for page_num in range(page_count):
                     # Create a task for processing each page in parallel
                     task = tg.create_task(
-                        process_page(pdf_path, page_num + 1, job_id, doc_id, S3_BUCKET)
+                        process_page(pdf_path, page_num + 1, job_id, doc_id, S3_BUCKET, semaphore)
                     )
                     page_tasks.append(task)
             
@@ -97,31 +101,32 @@ async def status(job_id: str):
     """Dummy status endpoint – real implementation could query DynamoDB or S3."""
     return {"job_id": job_id, "status": "processing"}
 
-# Add this helper function for processing a single page
-async def process_page(pdf_path, page_num, job_id, doc_id, bucket):
-    # Configure parameters
-    target_longest_image_dim = 1024
-    target_anchor_text_len = 500
-    
-    # Build page query
-    query = await build_page_query(
-        str(pdf_path), 
-        page_num, 
-        target_longest_image_dim, 
-        target_anchor_text_len
-    )
-    
-    # Store the complete query result in S3
-    query_key = f"jobs/{job_id}/queries/{doc_id}/page_{page_num:04}.json"
-    s3.put_object(
-        Bucket=bucket, 
-        Key=query_key, 
-        Body=json.dumps(query).encode(),
-        ContentType="application/json"
-    )
-    
-    logger.info(f"Processed {doc_id} page {page_num}")
-    return query_key
+# Updated process_page function to use a semaphore
+async def process_page(pdf_path, page_num, job_id, doc_id, bucket, semaphore):
+    async with semaphore:  # Acquire semaphore before processing, release after
+        # Configure parameters
+        target_longest_image_dim = 1024
+        target_anchor_text_len = 500
+        
+        # Build page query
+        query = await build_page_query(
+            str(pdf_path), 
+            page_num, 
+            target_longest_image_dim, 
+            target_anchor_text_len
+        )
+        
+        # Store the complete query result in S3
+        query_key = f"jobs/{job_id}/queries/{doc_id}/page_{page_num:04}.json"
+        s3.put_object(
+            Bucket=bucket, 
+            Key=query_key, 
+            Body=json.dumps(query).encode(),
+            ContentType="application/json"
+        )
+        
+        logger.info(f"Processed {doc_id} page {page_num}")
+        return query_key
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
