@@ -20,7 +20,7 @@ load_dotenv()
 
 RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
-S3_BUCKET = "ocrolm"
+S3_BUCKET = os.getenv("S3_BUCKET")
 MAX_CONCURRENT_TASKS = 50
 
 runpod.api_key = RUNPOD_API_KEY
@@ -34,6 +34,7 @@ s3 = boto3.client(
 )
 
 app = FastAPI(title="OCR Pipeline API")
+
 
 @app.post("/ocr", status_code=202, dependencies=[Depends(validate_api_key)])
 async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
@@ -85,6 +86,8 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
             
             # Collect results from all tasks
             page_queries = [task.result() for task in page_tasks]
+
+            logger.info(f"Collected {len(page_queries)} page queries for {doc_id}")
             
             manifest["documents"].append({
                 "doc_id": doc_id,
@@ -93,13 +96,18 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
             })
 
     # enqueue RunPod serverless job (non-blocking)
-    # background_tasks.add_task(endpoint.run, input=manifest)
-    return JSONResponse({"job_id": job_id})
+    logger.info(f"Enqueuing RunPod job for {job_id}")
+    run_request = endpoint.run(manifest)
+    logger.info(f"RunPod job enqueued with ID: {run_request.id}")
+    status = run_request.status()
+    return JSONResponse({"job_id": job_id, "request_id": run_request.id, "status": status})
+
 
 @app.get("/status/{job_id}")
 async def status(job_id: str):
     """Dummy status endpoint – real implementation could query DynamoDB or S3."""
     return {"job_id": job_id, "status": "processing"}
+
 
 # Updated process_page function to use a semaphore
 async def process_page(pdf_path, page_num, job_id, doc_id, bucket, semaphore):
@@ -127,6 +135,7 @@ async def process_page(pdf_path, page_num, job_id, doc_id, bucket, semaphore):
         
         logger.info(f"Processed {doc_id} page {page_num}")
         return query_key
+    
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

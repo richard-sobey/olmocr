@@ -1,1 +1,0 @@
-from olmocr.prompts.anchor import get_anchor_text
