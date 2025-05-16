@@ -42,12 +42,11 @@ RUN /root/.local/bin/uv pip install --system --no-cache "sglang[all]==0.4.2" --f
 RUN /root/.local/bin/uv pip install --system --no-cache runpod
 
 COPY olmocr olmocr
-COPY main.py main.py
-COPY main_runpod.py main_runpod.py
+COPY worker.py worker.py
 
 WORKDIR /root
 
 RUN python3 -m sglang.launch_server --help
 RUN python3 -m olmocr.pipeline --help
 
-CMD ["python3", "main_runpod.py"]
+CMD ["python3", "worker.py"]
