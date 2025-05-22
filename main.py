@@ -3,6 +3,7 @@ from pathlib import Path
 import uuid, os, asyncio, tempfile, json
 from pypdf import PdfReader
 import uvicorn
+import requests
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, BackgroundTasks, Depends
@@ -39,12 +40,12 @@ app = FastAPI(title="OCR Pipeline API")
 @app.post("/ocr", status_code=202, dependencies=[Depends(validate_api_key)])
 async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
     
-    job_id = uuid.uuid4().hex
+    manifest_id = uuid.uuid4().hex
     
     logger.info(f"Received OCR request for {len(pdfs)} documents")
 
     manifest = {
-        "job_id": job_id,
+        "manifest_id": manifest_id,
         "documents": [],
         "output_format": "jsonl",
         "webhook_url": webhook_url,
@@ -80,7 +81,7 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
                 for page_num in range(page_count):
                     # Create a task for processing each page in parallel
                     task = tg.create_task(
-                        process_page(pdf_path, page_num + 1, job_id, doc_id, S3_BUCKET, semaphore)
+                        process_page(pdf_path, page_num + 1, manifest_id, doc_id, S3_BUCKET, semaphore)
                     )
                     page_tasks.append(task)
             
@@ -96,17 +97,24 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
             })
 
     # enqueue RunPod serverless job (non-blocking)
-    logger.info(f"Enqueuing RunPod job for {job_id}")
+    logger.info(f"Enqueuing RunPod job for manifest: {manifest_id}")
     run_request = endpoint.run(manifest)
     logger.info(f"RunPod job enqueued with ID: {run_request.id}")
     status = run_request.status()
-    return JSONResponse({"job_id": job_id, "request_id": run_request.id, "status": status})
+    return JSONResponse({"job_id": run_request.job_id, "manifest_id": manifest_id, "status": status})
 
 
 @app.get("/status/{job_id}")
 async def status(job_id: str):
-    """Dummy status endpoint – real implementation could query DynamoDB or S3."""
-    return {"job_id": job_id, "status": "processing"}
+    if not len(job_id):
+        return JSONResponse({"error": "Job ID is required"}, status_code=400)
+    headers = {
+        'Authorization': f'Bearer {os.getenv("RUNPOD_API_KEY")}',
+        'Content-Type': 'application/json'
+    }
+    url = f"https://api.runpod.ai/v2/{os.getenv('RUNPOD_ENDPOINT_ID')}/status/{job_id}"
+    resp = requests.get(url, headers=headers)
+    return JSONResponse(resp.json())
 
 
 # Updated process_page function to use a semaphore
