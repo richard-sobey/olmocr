@@ -4,6 +4,7 @@ import uuid, os, asyncio, tempfile, json
 from pypdf import PdfReader
 import uvicorn
 import requests
+from dataclasses import asdict
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, BackgroundTasks, Depends
@@ -13,6 +14,7 @@ import boto3
 
 from auth import validate_api_key
 from olmocr.pipeline import build_page_query
+from olmocr.prompts.anchor import _pdf_report
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -23,6 +25,9 @@ RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 S3_BUCKET = os.getenv("S3_BUCKET")
 MAX_CONCURRENT_TASKS = 50
+
+TARGET_LONGEST_IMAGE_DIM = 1024
+TARGET_ANCHOR_TEXT_LEN = 6000
 
 runpod.api_key = RUNPOD_API_KEY
 endpoint = runpod.Endpoint(RUNPOD_ENDPOINT)
@@ -120,24 +125,31 @@ async def status(job_id: str):
 # Updated process_page function to use a semaphore
 async def process_page(pdf_path, page_num, job_id, doc_id, bucket, semaphore):
     async with semaphore:  # Acquire semaphore before processing, release after
-        # Configure parameters
-        target_longest_image_dim = 1024
-        target_anchor_text_len = 500
         
         # Build page query
         query = await build_page_query(
             str(pdf_path), 
             page_num, 
-            target_longest_image_dim, 
-            target_anchor_text_len
+            TARGET_LONGEST_IMAGE_DIM, 
+            TARGET_ANCHOR_TEXT_LEN
         )
+
+        # separately get raw anchor text
+        page_report = await asyncio.to_thread(_pdf_report, str(pdf_path), page_num)
+        page_report_dict = asdict(page_report)
+
+        # prepare payload
+        payload = {
+            "query": query,
+            "page_report": page_report_dict
+        }
         
         # Store the complete query result in S3
         query_key = f"jobs/{job_id}/queries/{doc_id}/page_{page_num:04}.json"
         s3.put_object(
             Bucket=bucket, 
             Key=query_key, 
-            Body=json.dumps(query).encode(),
+            Body=json.dumps(payload).encode(),
             ContentType="application/json"
         )
         
