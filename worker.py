@@ -119,7 +119,7 @@ async def post_webhook(url: str, payload: dict, max_attempts: int = 5):
 # RunPod handler entry-point
 # ---------------------------------------------------------------------------
 
-def handler(job):
+async def handler(job):
     job_input = job["input"]
     job_id = job_input.get("id")  # job id
     manifest = job_input.get("manifest")
