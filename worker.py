@@ -52,7 +52,7 @@ async def initialize():
     await sglang_server_ready()
 
 
-asyncio.run(initialize())
+# asyncio.run(initialize())
 
 
 # ---------------------------------------------------------------------------
