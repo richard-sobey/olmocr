@@ -52,7 +52,7 @@ async def initialize():
     await sglang_server_ready()
 
 
-# asyncio.run(initialize())
+asyncio.run(initialize())
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +119,10 @@ async def post_webhook(url: str, payload: dict, max_attempts: int = 5):
 # RunPod handler entry-point
 # ---------------------------------------------------------------------------
 
-async def handler(event):
-    job_id = event["id"]  # RunPod job id
-    manifest = event["input"]
+def handler(job):
+    job_input = job["input"]
+    job_id = job_input.get("id")  # job id
+    manifest = job_input.get("manifest")
 
     logger.info(f"Processing job {job_id}")
     asyncio.sleep(10)
