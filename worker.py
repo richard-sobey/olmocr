@@ -6,7 +6,7 @@ from concurrent.futures.process import BrokenProcessPool
 from PIL import Image
 from dotenv import load_dotenv
 
-from olmocr.check import check_sglang_version, check_torch_gpu_available
+from olmocr.pipeline import check_sglang_version, check_torch_gpu_available
 from olmocr.prompts import PageResponse, build_finetuning_prompt
 from olmocr.prompts.anchor import PageReport, _linearize_pdf_report
 from olmocr.s3_utils import parse_s3_path
