@@ -103,7 +103,13 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
 
     # enqueue RunPod serverless job (non-blocking)
     logger.info(f"Enqueuing RunPod job for manifest: {manifest_id}")
-    run_request = endpoint.run(manifest)
+    
+    run_request = endpoint.run({
+        "input": {
+            "id": manifest_id,
+            "manifest": manifest
+        }
+    })
     logger.info(f"RunPod job enqueued with ID: {run_request.job_id}")
     status = run_request.status()
     return JSONResponse({"job_id": run_request.job_id, "manifest_id": manifest_id, "status": status})

@@ -80,7 +80,8 @@ async def initialize():
 async def load_page_data(s3_path: str) -> dict:
     assert s3_path.startswith("s3://")
     bucket, key = parse_s3_path(s3_path)
-    return s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+    raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+    return json.loads(raw)
 
 
 def rotate_image(img_url: str, rotation: int) -> bytes:
@@ -115,6 +116,7 @@ async def process_page(page_query_path: str) -> PageResult:
 
     page_num = int(page_query_path.split("_")[-1].replace('.json', ''))
     query_data = await load_page_data(page_query_path)
+    logger.info(f"Query data: {query_data}")
     query = query_data["query"]
     page_report = PageReport(**query_data["page_report"])
 
