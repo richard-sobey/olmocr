@@ -43,6 +43,7 @@ RUN /root/.local/bin/uv pip install --system --no-cache runpod
 
 COPY olmocr olmocr
 COPY worker.py worker.py
+COPY pipeline_utility.py pipeline_utility.py
 
 WORKDIR /root
 
