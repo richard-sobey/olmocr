@@ -4,9 +4,10 @@ from types import SimpleNamespace
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from PIL import Image
+import torch
 from dotenv import load_dotenv
 
-from olmocr.pipeline import check_sglang_version, check_torch_gpu_available
+from olmocr.check import check_sglang_version, check_torch_gpu_available
 from olmocr.prompts import PageResponse, build_finetuning_prompt
 from olmocr.prompts.anchor import PageReport, _linearize_pdf_report
 from olmocr.s3_utils import parse_s3_path
@@ -46,6 +47,13 @@ async def initialize():
 
     # checks
     check_sglang_version()
+    logger.info("CUDA_VISIBLE_DEVICES = %r", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    logger.info("torch.version.cuda    = %r", torch.version.cuda)
+    logger.info("torch.cuda.is_available() = %r", torch.cuda.is_available())
+    logger.info("torch.cuda.device_count() = %d", torch.cuda.device_count())
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        logger.info("  device %d: %s, %.2f GiB", i, props.name, props.total_memory / (1024**3))
     check_torch_gpu_available()
 
     # download model
