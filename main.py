@@ -8,13 +8,15 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, UploadFile, BackgroundTasks, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 import runpod
 import boto3
+from botocore.exceptions import ClientError
 
 from auth import validate_api_key
 from olmocr.pipeline import build_page_query
 from olmocr.prompts.anchor import _pdf_report
+from olmocr.s3_utils import parse_s3_path
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -115,7 +117,7 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
     return JSONResponse({"job_id": run_request.job_id, "manifest_id": manifest_id, "status": status})
 
 
-@app.get("/status/{job_id}")
+@app.get("/status/{job_id}", dependencies=[Depends(validate_api_key)])
 async def status(job_id: str):
     if not len(job_id):
         return JSONResponse({"error": "Job ID is required"}, status_code=400)
@@ -126,6 +128,38 @@ async def status(job_id: str):
     url = f"https://api.runpod.ai/v2/{os.getenv('RUNPOD_ENDPOINT_ID')}/status/{job_id}"
     resp = requests.get(url, headers=headers)
     return JSONResponse(resp.json())
+
+
+@app.get("/results/{job_id}", dependencies=[Depends(validate_api_key)])
+async def results(job_id: str):
+    if not len(job_id):
+        return JSONResponse({"error": "Job ID is required"}, status_code=400)
+    results_path = f"s3://{S3_BUCKET}/jobs/{job_id}/results/output_{job_id}.jsonl"
+    try:
+        bucket, key = parse_s3_path(results_path)
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        lines = obj['Body'].read().decode().splitlines()
+        records = [json.loads(line) for line in lines]
+        return JSONResponse(records)
+        # # Stream the JSONL file directly from S3
+        # body = obj["Body"]
+        # return StreamingResponse(
+        #     (line + "\n" for line in body.iter_lines(decode_unicode=True)),
+        #     media_type="application/x-ndjson"
+        # )
+    except ClientError as e:
+        # Handle missing key: job may still be processing or failed
+        if e.response.get("Error", {}).get("Code") == "NoSuchKey":
+            return JSONResponse(
+                {"error": "Results not available. Job may still be processing or failed. Please check job status."},
+                status_code=404
+            )
+        else:
+            logger.error(f"Error getting results for {job_id}: {e}")
+            return JSONResponse({"error": f"Could not get results for {job_id}"}, status_code=500)
+    except Exception as e:
+        logger.error(f"Error getting results for {job_id}: {e}")
+        return JSONResponse({"error": f"Could not get results for {job_id}"}, status_code=500)
 
 
 # Updated process_page function to use a semaphore
