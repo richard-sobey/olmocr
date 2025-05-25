@@ -39,6 +39,9 @@ TARGET_LONGEST_IMAGE_DIM = 1024
 TARGET_ANCHOR_TEXT_LEN = 6000
 MAX_PAGE_ERROR_RATE = 0.004
 
+# Flag to ensure initialize is run once within handler's event loop
+initialized = False
+
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
@@ -116,7 +119,6 @@ async def process_page(page_query_path: str) -> PageResult:
 
     page_num = int(page_query_path.split("_")[-1].replace('.json', ''))
     query_data = await load_page_data(page_query_path)
-    logger.info(f"Query data: {query_data}")
     query = query_data["query"]
     page_report = PageReport(**query_data["page_report"])
 
@@ -287,9 +289,16 @@ async def post_webhook(url: str, payload: dict, max_attempts: int = 5):
 # ---------------------------------------------------------------------------
 
 async def handler(job):
+
     job_input = job["input"]
     job_id = job_input.get("id")  # job id
     manifest = job_input.get("manifest")
+
+     # Initialize the SGLang server and model once
+    global initialized
+    if not initialized:
+        await initialize()
+        initialized = True
 
     logger.info(f"Processing job {job_id}")
 
@@ -334,7 +343,6 @@ async def handler(job):
     return {"job_id": job_id, "status": "completed"}
 
 
-asyncio.run(initialize())
 runpod.serverless.start({
     "handler": handler,
     # "return_aggregate_stream": True
