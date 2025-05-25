@@ -330,7 +330,7 @@ async def handler(job):
             tf.flush()
 
             # Define the output S3 path using the work_hash
-            output_final_path = os.path.join(S3_BUCKET, "jobs", job_id, "results", f"output_{job_id}.jsonl")
+            output_final_path = os.path.join("jobs", job_id, "results", f"output_{job_id}.jsonl")
             s3.upload_file(tf.name, S3_BUCKET, output_final_path)
 
     except Exception as e:
