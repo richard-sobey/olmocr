@@ -42,6 +42,9 @@ MAX_PAGE_ERROR_RATE = 0.004
 # Flag to ensure initialize is run once within handler's event loop
 initialized = False
 
+# module-level executor for offloading anchor-text linearization
+process_pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("spawn"))
+
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
@@ -83,7 +86,7 @@ async def initialize():
 async def load_page_data(s3_path: str) -> dict:
     assert s3_path.startswith("s3://")
     bucket, key = parse_s3_path(s3_path)
-    raw = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode()
+    raw = await asyncio.to_thread(lambda: s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode())
     return json.loads(raw)
 
 
@@ -112,6 +115,7 @@ def report_to_natural_text(report: PageReport) -> str:
 # ---------------------------------------------------------------------------
 
 async def process_page(page_query_path: str) -> PageResult:
+    global semaphore
     exponential_backoffs = 0
     local_anchor_text_len = TARGET_ANCHOR_TEXT_LEN
     local_image_rotation = 0
@@ -135,7 +139,9 @@ async def process_page(page_query_path: str) -> PageResult:
         logger.info(f"Retrieved page query for {page_query_path}")
 
         try:
-            status_code, response_body = await apost(SGLANG_URL, json_data=query)
+            # throttle in-flight model requests
+            async with semaphore:
+                status_code, response_body = await apost(SGLANG_URL, json_data=query)
 
             if status_code == 400:
                 raise ValueError(f"Got BadRequestError from server: {response_body}, skipping this response")
@@ -149,11 +155,11 @@ async def process_page(page_query_path: str) -> PageResult:
             if base_response_data["usage"]["total_tokens"] > MAX_CONTEXT:
                 local_anchor_text_len = max(1, local_anchor_text_len // 2)
                 logger.info(f"Reducing anchor text len to {local_anchor_text_len} for {page_query_path}")
-                with ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("spawn")) as process_pool:
-                    loop = asyncio.get_running_loop()
-                    anchor_text = await loop.run_in_executor(
-                        process_pool, _linearize_pdf_report, page_report, local_anchor_text_len
-                    )
+                # reuse shared executor for anchor-text work
+                loop = asyncio.get_running_loop()
+                anchor_text = await loop.run_in_executor(
+                    process_pool, _linearize_pdf_report, page_report, local_anchor_text_len
+                )
                 query["messages"][0]["content"][0]["text"] = build_finetuning_prompt(anchor_text)
                 raise ValueError("Response exceeded model_max_context, cannot use this response")
 
@@ -302,8 +308,6 @@ async def handler(job):
 
     logger.info(f"Processing job {job_id}")
 
-    semaphore = asyncio.Semaphore(1)
-    
     try:
         async with asyncio.TaskGroup() as tg:
             doc_tasks = [tg.create_task(process_doc(job_id, doc)) for doc in manifest["documents"]]
@@ -336,7 +340,8 @@ async def handler(job):
     except Exception as e:
         logger.exception(f"Exception occurred while processing job {job_id}: {e}")
     finally:
-        semaphore.release()
+        # global semaphore remains managed in initialize and process_page
+        pass
 
 
     logger.info(f"Finished job {job_id}")
