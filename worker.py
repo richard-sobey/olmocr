@@ -5,7 +5,9 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from PIL import Image
 import torch
+import time
 from dotenv import load_dotenv
+from botocore.config import Config
 
 from olmocr.check import check_sglang_version, check_torch_gpu_available
 from olmocr.prompts import PageResponse, build_finetuning_prompt
@@ -20,11 +22,13 @@ logger.setLevel(logging.INFO)
 S3_BUCKET = os.getenv("S3_BUCKET")
 AWS_REGION = os.getenv("AWS_REGION")
 
+S3_CONFIG = Config(max_pool_connections=30)
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
     aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-    region_name=os.getenv('AWS_REGION')
+    region_name=os.getenv('AWS_REGION'),
+    config=S3_CONFIG
 )
 
 SGLANG_PORT = 30024
@@ -137,7 +141,9 @@ async def process_page(page_query_path: str) -> PageResult:
         logger.info(f"Retrieved page query for {page_query_path}")
 
         try:
+            t1 = time.time()
             status_code, response_body = await apost(SGLANG_URL, json_data=query)
+            t2 = time.time()
 
             if status_code == 400:
                 raise ValueError(f"Got BadRequestError from server: {response_body}, skipping this response")
@@ -160,7 +166,7 @@ async def process_page(page_query_path: str) -> PageResult:
                 raise ValueError("Response exceeded model_max_context, cannot use this response")
 
             logger.info(
-                f"sglang_input_tokens={base_response_data['usage'].get('prompt_tokens', 0)}, sglang_output_tokens={base_response_data['usage'].get('completion_tokens', 0)}"
+                f"sglang_input_tokens={base_response_data['usage'].get('prompt_tokens', 0)}, sglang_output_tokens={base_response_data['usage'].get('completion_tokens', 0)}, time_taken={t2 - t1}"
             )
 
             model_response_json = json.loads(base_response_data["choices"][0]["message"]["content"])
