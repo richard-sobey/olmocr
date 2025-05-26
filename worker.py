@@ -115,7 +115,6 @@ def report_to_natural_text(report: PageReport) -> str:
 # ---------------------------------------------------------------------------
 
 async def process_page(page_query_path: str) -> PageResult:
-    global semaphore
     exponential_backoffs = 0
     local_anchor_text_len = TARGET_ANCHOR_TEXT_LEN
     local_image_rotation = 0
@@ -129,7 +128,6 @@ async def process_page(page_query_path: str) -> PageResult:
     logger.info(f"Processing page query: {page_query_path}")
 
     while attempt < MAX_RETRIES:
-        
         query["temperature"] = TEMPERATURE_BY_ATTEMPT[
             min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
         ]  # Change temperature as number of attempts increases to overcome repetition issues at expense of quality
@@ -139,9 +137,7 @@ async def process_page(page_query_path: str) -> PageResult:
         logger.info(f"Retrieved page query for {page_query_path}")
 
         try:
-            # throttle in-flight model requests
-            async with semaphore:
-                status_code, response_body = await apost(SGLANG_URL, json_data=query)
+            status_code, response_body = await apost(SGLANG_URL, json_data=query)
 
             if status_code == 400:
                 raise ValueError(f"Got BadRequestError from server: {response_body}, skipping this response")
@@ -228,50 +224,52 @@ async def process_page(page_query_path: str) -> PageResult:
 
 
 async def process_doc(job_id: str, doc: dict):
-
-    doc_id = doc["doc_id"]
-    num_pages = doc["pages"]
-    page_queries = doc["page_queries"]
-
-    # List to hold the tasks for processing each page
-    page_tasks = []
-    page_results = []
-
+    global semaphore
+    await semaphore.acquire()
     try:
-        async with asyncio.TaskGroup() as tg:
-            for page_num in range(1, num_pages + 1):
-                task = tg.create_task(process_page(page_queries[page_num - 1]))
-                page_tasks.append(task)
+        doc_id = doc["doc_id"]
+        num_pages = doc["pages"]
+        page_queries = doc["page_queries"]
 
-        # Collect the results from the entire task group, assuming no exceptions
-        page_results = [task.result() for task in page_tasks]
+        # List to hold the tasks for processing each page
+        page_tasks = []
+        page_results = []
 
-        num_fallback_pages = sum(page_result.is_fallback for page_result in page_results)
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for page_num in range(1, num_pages + 1):
+                    task = tg.create_task(process_page(page_queries[page_num - 1]))
+                    page_tasks.append(task)
 
-        if num_fallback_pages / num_pages > MAX_PAGE_ERROR_RATE:
-            logger.error(
-                f"Document {doc_id} has {num_fallback_pages} fallback pages out of {num_pages} exceeding max_page_error_rate of {MAX_PAGE_ERROR_RATE}, discarding document."
-            )
+            # Collect the results from the entire task group, assuming no exceptions
+            page_results = [task.result() for task in page_tasks]
+
+            num_fallback_pages = sum(page_result.is_fallback for page_result in page_results)
+
+            if num_fallback_pages / num_pages > MAX_PAGE_ERROR_RATE:
+                logger.error(
+                    f"Document {doc_id} has {num_fallback_pages} fallback pages out of {num_pages} exceeding max_page_error_rate of {MAX_PAGE_ERROR_RATE}, discarding document."
+                )
+                return None
+            elif num_fallback_pages > 0:
+                logger.warning(
+                    f"Document {doc_id} processed with {num_fallback_pages} fallback pages out of {num_pages}, proceeding to build Dolma document."
+                )
+
+            return build_dolma_document(doc_id, page_results)
+        
+        except Exception as e:
+            # Check for ExceptionGroup with BrokenProcessPool
+            if isinstance(e, ExceptionGroup):
+                broken_pool, other = e.split(BrokenProcessPool)
+                if broken_pool is not None:  # Found at least one BrokenProcessPool
+                    logger.critical("Encountered BrokenProcessPool, exiting process.")
+                    sys.exit(1)
+
+            logger.exception(f"Exception in process_doc for {doc_id}: {e}")
             return None
-        elif num_fallback_pages > 0:
-            logger.warning(
-                f"Document {doc_id} processed with {num_fallback_pages} fallback pages out of {num_pages}, proceeding to build Dolma document."
-            )
-
-        return build_dolma_document(doc_id, page_results)
-    
-    except Exception as e:
-        # Check for ExceptionGroup with BrokenProcessPool
-        if isinstance(e, ExceptionGroup):
-            broken_pool, other = e.split(BrokenProcessPool)
-            if broken_pool is not None:  # Found at least one BrokenProcessPool
-                logger.critical("Encountered BrokenProcessPool, exiting process.")
-                sys.exit(1)
-
-        logger.exception(f"Exception in process_doc for {doc_id}: {e}")
-        # You can't build a dolma doc with even 1 failed page, so just get out of here
-        # However, you don't want to propagate an exception higher up and cancel the entire work_group
-        return None
+    finally:
+        semaphore.release()
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +338,8 @@ async def handler(job):
     except Exception as e:
         logger.exception(f"Exception occurred while processing job {job_id}: {e}")
     finally:
-        # global semaphore remains managed in initialize and process_page
+        # process_doc now handles semaphore release
         pass
-
 
     logger.info(f"Finished job {job_id}")
     return {"job_id": job_id, "status": "completed"}
