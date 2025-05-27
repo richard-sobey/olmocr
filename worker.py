@@ -57,8 +57,11 @@ async def warmup_vision_pipeline():
     """Send a dummy multimodal request to warm up the vision processing pipeline."""
     logger.info("Warming up vision pipeline...")
     
-    # Create a small dummy image (1x1 pixel base64 PNG)
-    dummy_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    # Create a 64x64 white image
+    dummy_img = Image.new('RGB', (64, 64), color='white')
+    img_buffer = BytesIO()
+    dummy_img.save(img_buffer, format='PNG')
+    dummy_image_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
     
     dummy_query = {
         "model": MODEL,
