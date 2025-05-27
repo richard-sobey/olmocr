@@ -118,7 +118,7 @@ async def initialize():
     await sglang_server_ready()
     
     # Warm up the vision pipeline to avoid cold start delays
-    # await warmup_vision_pipeline()
+    await warmup_vision_pipeline()
 
 # ---------------------------------------------------------------------------
 # Data loading helpers
