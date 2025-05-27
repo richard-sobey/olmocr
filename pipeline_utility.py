@@ -159,8 +159,9 @@ async def sglang_server_task(args, semaphore):
         "--log-level-http",
         "warning",
         # Multimodal optimizations
-        "--disable-radix-cache",  # Required for qwen2-vl models
-        "--chunked-prefill-size", "-1",  # Disable chunked prefill for multimodal
+        # "--disable-radix-cache",  # Required for qwen2-vl models
+        # "--chunked-prefill-size", "-1",  # Disable chunked prefill for multimodal
+        "--schedule-policy", "fcfs"
     ]
     cmd.extend(mem_fraction_arg)
 

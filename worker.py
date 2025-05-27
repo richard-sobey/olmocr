@@ -54,39 +54,54 @@ process_pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get
 # ---------------------------------------------------------------------------
 
 async def warmup_vision_pipeline():
-    """Send a dummy multimodal request to warm up the vision processing pipeline."""
-    logger.info("Warming up vision pipeline...")
+    """Send multiple dummy multimodal requests to warm up the vision processing pipeline and batch scheduler."""
+    logger.info("Warming up vision pipeline with batch simulation...")
     
-    # Create a 64x64 white image
-    dummy_img = Image.new('RGB', (64, 64), color='white')
+    # Create a realistic-sized image (similar to your actual workload)
+    dummy_img = Image.new('RGB', (1024, 1024), color='white')
     img_buffer = BytesIO()
     dummy_img.save(img_buffer, format='PNG')
     dummy_image_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
     
-    dummy_query = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{dummy_image_b64}"}},
-                ],
-            }
-        ],
-        "max_tokens": 10,
-        "temperature": 0.0,
-    }
+    # Create multiple warmup requests to trigger batch processing
+    warmup_queries = []
+    for i in range(5):  # Simulate multiple page queries
+        dummy_query = {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Analyze this document page {i+1}. Extract any text content."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{dummy_image_b64}"}},
+                    ],
+                }
+            ],
+            "max_tokens": 50,
+            "temperature": 0.0,
+        }
+        warmup_queries.append(dummy_query)
     
     try:
         start_time = time.time()
-        status_code, response_body = await apost(SGLANG_URL, json_data=dummy_query)
+        
+        # Send all warmup requests concurrently to trigger batch processing
+        tasks = []
+        for query in warmup_queries:
+            task = asyncio.create_task(apost(SGLANG_URL, json_data=query))
+            tasks.append(task)
+        
+        # Wait for all requests to complete
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         warmup_time = time.time() - start_time
         
-        if status_code == 200:
-            logger.info(f"Vision pipeline warmed up successfully in {warmup_time:.2f} seconds")
-        else:
-            logger.warning(f"Vision pipeline warmup returned status {status_code}: {response_body}")
+        successful_requests = sum(1 for result in results if not isinstance(result, Exception) and result[0] == 200)
+        logger.info(f"Vision pipeline warmed up with {successful_requests}/{len(warmup_queries)} successful requests in {warmup_time:.2f} seconds")
+        
+        if successful_requests == 0:
+            logger.warning("All warmup requests failed - vision pipeline may not be properly warmed up")
+            
     except Exception as e:
         logger.warning(f"Vision pipeline warmup failed: {e}")
 
