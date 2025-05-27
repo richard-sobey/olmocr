@@ -44,10 +44,12 @@ RUN /root/.local/bin/uv pip install --system --no-cache runpod
 COPY olmocr olmocr
 COPY worker.py worker.py
 COPY pipeline_utility.py pipeline_utility.py
+COPY main_supp.py main_supp.py
+COPY main_runpod.py main_runpod.py
 
 WORKDIR /root
 
 RUN python3 -m sglang.launch_server --help
 RUN python3 -m olmocr.pipeline --help
 
-CMD ["python3", "worker.py"]
+CMD ["python3", "main_runpod.py"]
