@@ -53,6 +53,40 @@ process_pool = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get
 # Initialization
 # ---------------------------------------------------------------------------
 
+async def warmup_vision_pipeline():
+    """Send a dummy multimodal request to warm up the vision processing pipeline."""
+    logger.info("Warming up vision pipeline...")
+    
+    # Create a small dummy image (1x1 pixel base64 PNG)
+    dummy_image_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+    
+    dummy_query = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{dummy_image_b64}"}},
+                ],
+            }
+        ],
+        "max_tokens": 10,
+        "temperature": 0.0,
+    }
+    
+    try:
+        start_time = time.time()
+        status_code, response_body = await apost(SGLANG_URL, json_data=dummy_query)
+        warmup_time = time.time() - start_time
+        
+        if status_code == 200:
+            logger.info(f"Vision pipeline warmed up successfully in {warmup_time:.2f} seconds")
+        else:
+            logger.warning(f"Vision pipeline warmup returned status {status_code}: {response_body}")
+    except Exception as e:
+        logger.warning(f"Vision pipeline warmup failed: {e}")
+
 async def initialize():
 
     # checks
@@ -82,6 +116,9 @@ async def initialize():
     sglang_server = asyncio.create_task(sglang_server_host(args, semaphore))
 
     await sglang_server_ready()
+    
+    # Warm up the vision pipeline to avoid cold start delays
+    # await warmup_vision_pipeline()
 
 # ---------------------------------------------------------------------------
 # Data loading helpers

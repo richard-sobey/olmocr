@@ -52,4 +52,4 @@ WORKDIR /root
 RUN python3 -m sglang.launch_server --help
 RUN python3 -m olmocr.pipeline --help
 
-CMD ["python3", "main_runpod.py"]
+CMD ["python3", "worker.py"]
