@@ -68,7 +68,6 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
             data = await pdf_file.read()
             doc_id = Path(pdf_file.filename).stem or uuid.uuid4().hex
             
-            """
             # Save PDF to temp dir
             pdf_path = Path(td) / f"{doc_id}.pdf"
             with open(pdf_path, "wb") as f:
@@ -82,7 +81,6 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
                 logger.error(f"Error counting pages for {pdf_path}: {e}")
                 raise Exception(f"Could not count number of pages for {pdf_path}")
             
-            """
             # Store the complete query result in S3 (run in thread pool to avoid blocking)
             query_key = f"jobs/{manifest_id}/{doc_id}.pdf"
             loop = asyncio.get_event_loop()
@@ -101,7 +99,7 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
             
             return {
                 "doc_id": doc_id,
-                #"pages": page_count,
+                "pages": page_count,
                 "path": query_key,
             }
         

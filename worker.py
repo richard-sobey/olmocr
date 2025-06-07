@@ -121,7 +121,7 @@ async def handler(job):
     avg_pages_per_pdf = sum(page_counts) / len(page_counts)
     items_per_group = max(1, int(NUM_PAGES_PER_GROUP / avg_pages_per_pdf))
 
-    logger.info(f"Found {len(manifest["documents"]):,} documents with an average of {avg_pages_per_pdf:.2f} pages per document")
+    logger.info(f"Found {len(manifest['documents']):,} documents with an average of {avg_pages_per_pdf:.2f} pages per document")
 
     work_queue = S3WorkQueue(s3, s3_workspace)
     await work_queue.populate_queue([doc['path'] for doc in manifest["documents"]], items_per_group)
