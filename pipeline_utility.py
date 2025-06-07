@@ -1,21 +1,54 @@
+import argparse
 import asyncio
 import atexit
-import json
-import logging
-import re
-import sys
-import time
-from dataclasses import dataclass
-from functools import cache
-from urllib.parse import urlparse
-import httpx
+import base64
 import datetime
 import hashlib
+import json
+import logging
+import multiprocessing
+import os
+import random
+import re
+import shutil
+import sys
+import tempfile
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
+from functools import cache, partial
+from io import BytesIO
+from urllib.parse import urlparse
 
+import boto3
+import httpx
+from botocore.exceptions import ClientError
+from PIL import Image
+from pypdf import PdfReader
+from tqdm import tqdm
+
+from olmocr.check import (
+    check_poppler_version,
+    check_sglang_version,
+    check_torch_gpu_available,
+)
+from olmocr.data.renderpdf import render_pdf_to_base64png
 from olmocr.filter.filter import Language, PdfFilter
-from olmocr.prompts import PageResponse
+from olmocr.image_utils import convert_image_to_pdf_bytes, is_jpeg, is_png
+from olmocr.metrics import MetricsKeeper, WorkerTracker
+from olmocr.prompts import PageResponse, build_finetuning_prompt
+from olmocr.prompts.anchor import get_anchor_text
+from olmocr.s3_utils import (
+    download_zstd_csv,
+    expand_s3_glob,
+    get_s3_bytes,
+    get_s3_bytes_with_backoff,
+    parse_s3_path,
+)
 from olmocr.version import VERSION
-
+from olmocr.work_queue import LocalWorkQueue, S3WorkQueue, WorkQueue
+from botocore.config import Config
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -38,11 +71,45 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 sglang_logger.addHandler(file_handler)
 
+# Quiet logs from pypdf
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+# Global s3 clients fo the whole script, we have two separate ones in case your workspace and your pdfs are in different accounts
+S3_BUCKET = os.getenv("S3_BUCKET")
+AWS_REGION = os.getenv("AWS_REGION")
+
+S3_CONFIG = Config(max_pool_connections=30)
+s3 = boto3.client(
+    's3',
+    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+    region_name=os.getenv('AWS_REGION'),
+    config=S3_CONFIG
+)
+
+# Global variables for token statistics
+metrics = MetricsKeeper(window=60 * 5)
+tracker = WorkerTracker()
+
+# Process pool for offloading cpu bound work, like calculating anchor texts, max 32 workers, otherwise it can spawn way too many workers on a big machine
+process_pool = ProcessPoolExecutor(max_workers=min(multiprocessing.cpu_count() // 2 + 1, 32), mp_context=multiprocessing.get_context("spawn"))
+
 # Filter object, cached so it will only get loaded when/if you need it
 get_pdf_filter = cache(lambda: PdfFilter(languages_to_keep={Language.ENGLISH, None}, apply_download_spam_check=True, apply_form_check=True))
 
 # Specify a default port, but it can be overridden by args
 SGLANG_SERVER_PORT = 30024
+
+MODEL = "allenai/olmOCR-7B-0225-preview"
+MAX_CONTEXT = 8192
+MODEL_CHAT_TEMPLATE = "qwen2-vl"
+MAX_PAGE_RETRIES = 8
+TEMPERATURE_BY_ATTEMPT = [0.1, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+TARGET_LONGEST_IMAGE_DIM = 1024
+TARGET_ANCHOR_TEXT_LEN = 6000
+MAX_PAGE_ERROR_RATE = 0.004
+NUM_PAGES_PER_GROUP = 500
+APPLY_FILTER = False
 
 
 @dataclass(frozen=True)
@@ -54,6 +121,49 @@ class PageResult:
     input_tokens: int
     output_tokens: int
     is_fallback: bool
+
+
+async def build_page_query(local_pdf_path: str, page: int, target_longest_image_dim: int, target_anchor_text_len: int, image_rotation: int = 0) -> dict:
+    MAX_TOKENS = 3000
+    assert image_rotation in [0, 90, 180, 270], "Invalid image rotation provided in build_page_query"
+
+    # Allow the page rendering to process in the background while we get the anchor text (which blocks the main thread)
+    image_base64 = asyncio.to_thread(render_pdf_to_base64png, local_pdf_path, page, target_longest_image_dim=target_longest_image_dim)
+
+    # GET ANCHOR TEXT IS NOT THREAD SAFE!! Ahhhh..... don't try to do it
+    # and it's also CPU bound, so it needs to run in a process pool
+    loop = asyncio.get_running_loop()
+    anchor_text = loop.run_in_executor(
+        process_pool, partial(get_anchor_text, pdf_engine="pdfreport", target_length=target_anchor_text_len), local_pdf_path, page
+    )
+
+    image_base64, anchor_text = await asyncio.gather(image_base64, anchor_text)  # type: ignore
+    if image_rotation != 0:
+        image_bytes = base64.b64decode(image_base64)
+        with Image.open(BytesIO(image_bytes)) as img:
+            rotated_img = img.rotate(-image_rotation, expand=True)
+
+            # Save the rotated image to a bytes buffer
+            buffered = BytesIO()
+            rotated_img.save(buffered, format="PNG")
+
+        # Encode the rotated image back to base64
+        image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    return {
+        "model": "Qwen/Qwen2-VL-7B-Instruct",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": build_finetuning_prompt(anchor_text)},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
+                ],
+            }
+        ],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+    }
 
 
 # Manual simple implementation of HTTP Post
@@ -121,6 +231,290 @@ async def apost(url, json_data):
                 pass
 
 
+async def process_page(worker_id: int, pdf_orig_path: str, pdf_local_path: str, page_num: int) -> PageResult:
+    COMPLETION_URL = f"http://localhost:{SGLANG_SERVER_PORT}/v1/chat/completions"
+    MAX_RETRIES = MAX_PAGE_RETRIES
+    TEMPERATURE_BY_ATTEMPT = [0.1, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    exponential_backoffs = 0
+    local_anchor_text_len = TARGET_ANCHOR_TEXT_LEN
+    local_image_rotation = 0
+    attempt = 0
+    await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "started")
+
+    while attempt < MAX_RETRIES:
+        query = await build_page_query(pdf_local_path, page_num, TARGET_LONGEST_IMAGE_DIM, local_anchor_text_len, image_rotation=local_image_rotation)
+        query["temperature"] = TEMPERATURE_BY_ATTEMPT[
+            min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
+        ]  # Change temperature as number of attempts increases to overcome repetition issues at expense of quality
+
+        logger.info(f"Built page query for {pdf_orig_path}-{page_num}")
+
+        try:
+            status_code, response_body = await apost(COMPLETION_URL, json_data=query)
+
+            if status_code == 400:
+                raise ValueError(f"Got BadRequestError from server: {response_body}, skipping this response")
+            elif status_code == 500:
+                raise ValueError(f"Got InternalServerError from server: {response_body}, skipping this response")
+            elif status_code != 200:
+                raise ValueError(f"Error http status {status_code}")
+
+            base_response_data = json.loads(response_body)
+
+            if base_response_data["usage"]["total_tokens"] > MAX_CONTEXT:
+                local_anchor_text_len = max(1, local_anchor_text_len // 2)
+                logger.info(f"Reducing anchor text len to {local_anchor_text_len} for {pdf_orig_path}-{page_num}")
+                raise ValueError("Response exceeded model_max_context, cannot use this response")
+
+            metrics.add_metrics(
+                sglang_input_tokens=base_response_data["usage"].get("prompt_tokens", 0),
+                sglang_output_tokens=base_response_data["usage"].get("completion_tokens", 0),
+            )
+
+            model_response_json = json.loads(base_response_data["choices"][0]["message"]["content"])
+            page_response = PageResponse(**model_response_json)
+
+            if not page_response.is_rotation_valid and attempt < MAX_RETRIES - 1:
+                logger.info(
+                    f"Got invalid_page rotation for {pdf_orig_path}-{page_num} attempt {attempt}, retrying with {page_response.rotation_correction} rotation"
+                )
+                local_image_rotation = page_response.rotation_correction
+                raise ValueError(f"invalid_page rotation for {pdf_orig_path}-{page_num}")
+
+            await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "finished")
+            return PageResult(
+                pdf_orig_path,
+                page_num,
+                page_response,
+                input_tokens=base_response_data["usage"].get("prompt_tokens", 0),
+                output_tokens=base_response_data["usage"].get("completion_tokens", 0),
+                is_fallback=False,
+            )
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            logger.warning(f"Client error on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} {e}")
+
+            # Now we want to do exponential backoff, and not count this as an actual page retry
+            # Page retrys are supposed to be for fixing bad results from the model, but actual requests to sglang
+            # are supposed to work. Probably this means that the server is just restarting
+            sleep_delay = 10 * (2**exponential_backoffs)
+            exponential_backoffs += 1
+            logger.info(f"Sleeping for {sleep_delay} seconds on {pdf_orig_path}-{page_num} to allow server restart")
+            await asyncio.sleep(sleep_delay)
+        except asyncio.CancelledError:
+            logger.info(f"Process page {pdf_orig_path}-{page_num} cancelled")
+            await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "cancelled")
+            raise
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error on attempt {attempt} for {pdf_orig_path}-{page_num}: {e}")
+            attempt += 1
+        except ValueError as e:
+            logger.warning(f"ValueError on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} - {e}")
+            attempt += 1
+        except Exception as e:
+            logger.exception(f"Unexpected error on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} - {e}")
+            attempt += 1
+
+    logger.error(f"Failed to process {pdf_orig_path}-{page_num} after {MAX_RETRIES} attempts.")
+    await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "errored")
+
+    return PageResult(
+        pdf_orig_path,
+        page_num,
+        PageResponse(
+            natural_text=get_anchor_text(pdf_local_path, page_num, pdf_engine="pdftotext"),
+            primary_language=None,
+            is_rotation_valid=True,
+            rotation_correction=0,
+            is_table=False,
+            is_diagram=False,
+        ),
+        input_tokens=0,
+        output_tokens=0,
+        is_fallback=True,
+    )
+
+
+async def process_pdf(worker_id: int, pdf_orig_path: str):
+    with tempfile.NamedTemporaryFile("wb+", suffix=".pdf") as tf:
+        try:
+            data = await asyncio.to_thread(lambda: get_s3_bytes_with_backoff(s3, pdf_orig_path))
+            tf.write(data)
+            tf.flush()
+        except ClientError as ex:
+            if ex.response["Error"]["Code"] == "NoSuchKey":
+                logger.info(f"S3 File Not found, skipping it completely {pdf_orig_path}")
+                return None
+            else:
+                raise
+
+        if is_png(tf.name) or is_jpeg(tf.name):
+            logger.info(f"Converting {pdf_orig_path} from image to PDF format...")
+            tf.seek(0)
+            tf.write(convert_image_to_pdf_bytes(tf.name))
+            tf.flush()
+
+        try:
+            reader = PdfReader(tf.name)
+            num_pages = reader.get_num_pages()
+        except:
+            logger.exception(f"Could not count number of pages for {pdf_orig_path}, aborting document")
+            return None
+
+        logger.info(f"Got {num_pages} pages to do for {pdf_orig_path} in worker {worker_id}")
+
+        if APPLY_FILTER and get_pdf_filter().filter_out_pdf(tf.name):
+            logger.info(f"Filtering out pdf {pdf_orig_path}")
+            return None
+
+        # List to hold the tasks for processing each page
+        page_tasks = []
+        page_results = []
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for page_num in range(1, num_pages + 1):
+                    task = tg.create_task(process_page(worker_id, pdf_orig_path, tf.name, page_num))
+                    page_tasks.append(task)
+
+            # Collect the results from the entire task group, assuming no exceptions
+            page_results = [task.result() for task in page_tasks]
+
+            num_fallback_pages = sum(page_result.is_fallback for page_result in page_results)
+
+            if num_fallback_pages / num_pages > MAX_PAGE_ERROR_RATE:
+                logger.error(
+                    f"Document {pdf_orig_path} has {num_fallback_pages} fallback pages out of {num_pages} exceeding max_page_error_rate of {MAX_PAGE_ERROR_RATE}, discarding document."
+                )
+                return None
+            elif num_fallback_pages > 0:
+                logger.warning(
+                    f"Document {pdf_orig_path} processed with {num_fallback_pages} fallback pages out of {num_pages}, proceeding to build Dolma document."
+                )
+
+            return build_dolma_document(pdf_orig_path, page_results)
+        except Exception as e:
+            # Check for ExceptionGroup with BrokenProcessPool
+            if isinstance(e, ExceptionGroup):
+                broken_pool, other = e.split(BrokenProcessPool)
+                if broken_pool is not None:  # Found at least one BrokenProcessPool
+                    logger.critical("Encountered BrokenProcessPool, exiting process.")
+                    sys.exit(1)
+
+            logger.exception(f"Exception in process_pdf for {pdf_orig_path}: {e}")
+            # You can't build a dolma doc with even 1 failed page, so just get out of here
+            # However, you don't want to propagate an exception higher up and cancel the entire work_group
+            return None
+
+
+def build_dolma_document(pdf_orig_path, page_results):
+    # Build the document text and page spans
+    document_text = ""
+    pdf_page_spans = []
+    current_char_pos = 0
+
+    for index, page_result in enumerate(page_results):
+        if page_result.response.natural_text is not None:
+            content = page_result.response.natural_text + ("\n" if index < len(page_results) - 1 else "")
+        else:
+            content = ""
+
+        start_pos = current_char_pos
+        document_text += content
+        current_char_pos = len(document_text)
+        pdf_page_spans.append([start_pos, current_char_pos, page_result.page_num])
+
+    if not document_text:
+        logger.info(f"No document text for {pdf_orig_path}")
+        return None  # Return None if the document text is empty
+
+    # Build the Dolma document
+    metadata = {
+        "Source-File": pdf_orig_path,
+        "olmocr-version": VERSION,
+        "pdf-total-pages": len(page_results),
+        "total-input-tokens": sum(page.input_tokens for page in page_results),
+        "total-output-tokens": sum(page.output_tokens for page in page_results),
+        "total-fallback-pages": sum(page.is_fallback for page in page_results),
+    }
+
+    id_ = hashlib.sha1(document_text.encode()).hexdigest()
+
+    dolma_doc = {
+        "id": id_,
+        "text": document_text,
+        "source": "olmocr",
+        "added": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "created": datetime.datetime.now().strftime("%Y-%m-%d"),
+        "metadata": metadata,
+        "attributes": {"pdf_page_numbers": pdf_page_spans},
+    }
+    return dolma_doc
+
+
+async def worker(s3_workspace, work_queue: WorkQueue, semaphore, worker_id):
+    while True:
+        # Wait until allowed to proceed
+        await semaphore.acquire()
+
+        work_item = await work_queue.get_work()
+
+        if work_item is None:
+            logger.info(f"Worker {worker_id} exiting due to empty queue")
+            semaphore.release()
+            break
+
+        logger.info(f"Worker {worker_id} processing work item {work_item.hash}")
+        await tracker.clear_work(worker_id)
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                dolma_tasks = [tg.create_task(process_pdf(worker_id, pdf)) for pdf in work_item.work_paths]
+                logger.info(f"Created all tasks for {work_item.hash}")
+
+            logger.info(f"Finished TaskGroup for worker on {work_item.hash}")
+
+            dolma_docs = []
+            for task in dolma_tasks:
+                try:
+                    result = task.result()
+                except:
+                    # some dolma doc creations may have failed
+                    pass
+
+                if result is not None:
+                    dolma_docs.append(result)
+
+            logger.info(f"Got {len(dolma_docs)} docs for {work_item.hash}")
+
+            # Write the Dolma documents to a local temporary file in JSONL format
+            with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tf:
+                for doc in dolma_docs:
+                    tf.write(json.dumps(doc))
+                    tf.write("\n")
+                tf.flush()
+
+                # Define the output S3 path using the work_hash
+                output_final_path = os.path.join(s3_workspace, "results", f"output_{work_item.hash}.jsonl")
+
+                if output_final_path.startswith("s3://"):
+                    bucket, key = parse_s3_path(output_final_path)
+                    s3.upload_file(tf.name, bucket, key)
+                else:
+                    shutil.copyfile(tf.name, output_final_path)
+
+            # Update finished token counts from successful documents
+            metrics.add_metrics(
+                finished_input_tokens=sum(doc["metadata"]["total-input-tokens"] for doc in dolma_docs),
+                finished_output_tokens=sum(doc["metadata"]["total-output-tokens"] for doc in dolma_docs),
+            )
+
+            await work_queue.mark_done(work_item)
+        except Exception as e:
+            logger.exception(f"Exception occurred while processing work_hash {work_item.hash}: {e}")
+        finally:
+            semaphore.release()
+
+
 async def sglang_server_task(args, semaphore):
     model_name_or_path = args.model
     import torch
@@ -158,10 +552,6 @@ async def sglang_server_task(args, semaphore):
         str(SGLANG_SERVER_PORT),
         "--log-level-http",
         "warning",
-        # Multimodal optimizations
-        # "--disable-radix-cache",  # Required for qwen2-vl models
-        # "--chunked-prefill-size", "8096",  # Disable chunked prefill for multimodal
-        # "--schedule-policy", "fcfs"
     ]
     cmd.extend(mem_fraction_arg)
 
@@ -298,46 +688,131 @@ async def download_model(model_name_or_path: str):
     logger.info(f"Model download complete '{model_name_or_path}'")
 
 
-def build_dolma_document(pdf_orig_path, page_results):
-    # Build the document text and page spans
-    document_text = ""
-    pdf_page_spans = []
-    current_char_pos = 0
+async def metrics_reporter(work_queue):
+    while True:
+        # Leading newlines preserve table formatting in logs
+        logger.info(f"Queue remaining: {work_queue.size}")
+        logger.info("\n" + str(metrics))
+        logger.info("\n" + str(await tracker.get_status_table()))
+        await asyncio.sleep(10)
 
-    for index, page_result in enumerate(page_results):
-        if page_result.response.natural_text is not None:
-            content = page_result.response.natural_text + ("\n" if index < len(page_results) - 1 else "")
-        else:
-            content = ""
 
-        start_pos = current_char_pos
-        document_text += content
-        current_char_pos = len(document_text)
-        pdf_page_spans.append([start_pos, current_char_pos, page_result.page_num])
+def print_stats(args):
+    LONG_CONTEXT_THRESHOLD = 32768
 
-    if not document_text:
-        logger.info(f"No document text for {pdf_orig_path}")
-        return None  # Return None if the document text is empty
+    assert args.workspace.startswith("s3://"), "Printing stats functionality only works with s3 workspaces for now."
 
-    # Build the Dolma document
-    metadata = {
-        "Source-File": pdf_orig_path,
-        "olmocr-version": VERSION,
-        "pdf-total-pages": len(page_results),
-        "total-input-tokens": sum(page.input_tokens for page in page_results),
-        "total-output-tokens": sum(page.output_tokens for page in page_results),
-        "total-fallback-pages": sum(page.is_fallback for page in page_results),
-    }
+    # Get total work items and completed items
+    index_file_s3_path = os.path.join(args.workspace, "work_index_list.csv.zstd")
+    output_glob = os.path.join(args.workspace, "results", "*.jsonl")
 
-    id_ = hashlib.sha1(document_text.encode()).hexdigest()
+    done_work_items = expand_s3_glob(s3, output_glob)
+    work_queue = {parts[0]: parts[1:] for line in download_zstd_csv(s3, index_file_s3_path) if (parts := line.strip().split(",")) and line.strip()}
 
-    dolma_doc = {
-        "id": id_,
-        "text": document_text,
-        "source": "olmocr",
-        "added": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "created": datetime.datetime.now().strftime("%Y-%m-%d"),
-        "metadata": metadata,
-        "attributes": {"pdf_page_numbers": pdf_page_spans},
-    }
-    return dolma_doc
+    total_items = len(work_queue)
+    completed_items = len(done_work_items)
+
+    def process_output_file(s3_path):
+        try:
+            data = get_s3_bytes(s3, s3_path)
+            doc_count = 0
+            total_input_tokens = 0
+            total_output_tokens = 0
+            total_pages = 0
+            total_fallback_pages = 0
+            processed_paths = set()
+
+            # Counters for long context docs within a single file
+            long_context_docs = 0
+            long_context_tokens = 0
+
+            for line in data.decode("utf-8").splitlines():
+                if line.strip():
+                    doc = json.loads(line)
+                    doc_count += 1
+                    doc_input_tokens = doc["metadata"].get("total-input-tokens", 0)
+                    doc_output_tokens = doc["metadata"].get("total-output-tokens", 0)
+                    doc_pages = doc["metadata"].get("pdf-total-pages", 0)
+                    doc_fallback_pages = doc["metadata"].get("total-fallback-pages", 0)
+
+                    total_input_tokens += doc_input_tokens
+                    total_output_tokens += doc_output_tokens
+                    total_pages += doc_pages
+                    total_fallback_pages += doc_fallback_pages
+                    processed_paths.add(doc["metadata"]["Source-File"])
+
+                    # Check if this doc exceeds the long context threshold
+                    if doc_output_tokens > LONG_CONTEXT_THRESHOLD:
+                        long_context_docs += 1
+                        long_context_tokens += doc_output_tokens
+
+            return (
+                doc_count,
+                total_input_tokens,
+                total_output_tokens,
+                total_pages,
+                total_fallback_pages,
+                processed_paths,
+                long_context_docs,
+                long_context_tokens,
+            )
+        except Exception as e:
+            logger.warning(f"Error processing {s3_path}: {e}")
+            return 0, 0, 0, 0, 0, set(), 0, 0
+
+    print("\nProcessing output files...")
+    docs_total = 0
+    input_tokens_total = 0
+    output_tokens_total = 0
+    pages_total = 0
+    fallback_pages_total = 0
+    all_processed_paths = set()
+    original_paths = set()
+
+    # Counters for long context documents across all files
+    long_context_docs_count = 0
+    long_context_tokens_total = 0
+
+    # First collect all original PDF paths
+    for done_work_item in done_work_items:
+        if match := re.search(r"output_(\w+).jsonl", done_work_item):
+            done_work_hash = match.group(1)
+            original_paths.update(work_queue[done_work_hash])
+
+    with ThreadPoolExecutor() as executor:
+        futures = {executor.submit(process_output_file, item): item for item in done_work_items}
+
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            (doc_count, input_tokens, output_tokens, pages, fallback_pages, processed_paths, long_context_docs, long_context_tokens) = future.result()
+            docs_total += doc_count
+            input_tokens_total += input_tokens
+            output_tokens_total += output_tokens
+            pages_total += pages
+            fallback_pages_total += fallback_pages
+            all_processed_paths.update(processed_paths)
+            long_context_docs_count += long_context_docs
+            long_context_tokens_total += long_context_tokens
+
+    skipped_paths = original_paths - all_processed_paths
+
+    print("\nWork Items Status:")
+    print(f"Total work items: {total_items:,}")
+    print(f"Completed items: {completed_items:,}")
+    print(f"Remaining items: {total_items - completed_items:,}")
+
+    print("\nResults:")
+    print(f"Total documents processed: {docs_total:,}")
+    print(f"Total documents skipped: {len(skipped_paths):,}")
+    print(f"Total pages on fallback: {fallback_pages_total:,}")
+    print(f"Total pages processed: {pages_total:,}")
+
+    print(f"\nTotal output tokens: {output_tokens_total:,}")
+    print(f"Projected output tokens: {round((output_tokens_total/max(1, completed_items))*total_items):,}")
+
+    print(f"\nAverage pages per doc: {pages_total/max(1,docs_total):,.1f}")
+    print(f"Average output tokens per doc: {output_tokens_total/max(1,docs_total):,.1f}")
+    print(f"Average output tokens per page: {output_tokens_total/max(1,pages_total):,.1f}")
+
+    # Print long context documents stats
+    print(f"\nLong Context Documents (>{LONG_CONTEXT_THRESHOLD} tokens): {long_context_docs_count:,}")
+    print(f"Total tokens in long context documents: {long_context_tokens_total:,}")

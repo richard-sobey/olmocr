@@ -11,6 +11,7 @@ from fastapi import FastAPI, UploadFile, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 import runpod
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from auth import validate_api_key
@@ -26,7 +27,7 @@ load_dotenv()
 RUNPOD_ENDPOINT = os.getenv("RUNPOD_ENDPOINT_ID")
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 S3_BUCKET = os.getenv("S3_BUCKET")
-MAX_CONCURRENT_TASKS = 50
+MAX_CONCURRENT_TASKS = 25
 
 TARGET_LONGEST_IMAGE_DIM = 1024
 TARGET_ANCHOR_TEXT_LEN = 6000
@@ -38,7 +39,8 @@ s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
     aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-    region_name=os.getenv('AWS_REGION')
+    region_name=os.getenv('AWS_REGION'),
+    config=Config(max_pool_connections=50)
 )
 
 app = FastAPI(title="OCR Pipeline API")
@@ -58,15 +60,15 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
         "webhook_url": webhook_url,
     }
 
-    # Create a semaphore to limit concurrency to 20 tasks
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-
     # temporary workspace for image conversion
     with tempfile.TemporaryDirectory() as td:
-        for pdf_file in pdfs:
+        
+        async def process_pdf(pdf_file: UploadFile) -> dict:
+            """Process a single PDF file asynchronously"""
             data = await pdf_file.read()
             doc_id = Path(pdf_file.filename).stem or uuid.uuid4().hex
             
+            """
             # Save PDF to temp dir
             pdf_path = Path(td) / f"{doc_id}.pdf"
             with open(pdf_path, "wb") as f:
@@ -78,33 +80,48 @@ async def ocr(pdfs: list[UploadFile], webhook_url: str | None = None):
                 page_count = reader.get_num_pages()
             except Exception as e:
                 logger.error(f"Error counting pages for {pdf_path}: {e}")
-                return JSONResponse({"error": f"Could not count number of pages for {pdf_path}, aborting document"}, status_code=500)
+                raise Exception(f"Could not count number of pages for {pdf_path}")
             
-            # Process each page with build_page_query
-            page_queries = []
-            page_tasks = []
+            """
+            # Store the complete query result in S3 (run in thread pool to avoid blocking)
+            query_key = f"jobs/{manifest_id}/{doc_id}.pdf"
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: s3.put_object(
+                    Bucket=S3_BUCKET, 
+                    Key=query_key, 
+                    Body=data,
+                    ContentType="application/pdf"
+                )
+            )
             
-            async with asyncio.TaskGroup() as tg:
-                for page_num in range(page_count):
-                    # Create a task for processing each page in parallel
-                    task = tg.create_task(
-                        process_page(pdf_path, page_num + 1, manifest_id, doc_id, S3_BUCKET, semaphore)
-                    )
-                    page_tasks.append(task)
+            # Clean up the temporary PDF file
+            # pdf_path.unlink()
             
-            # Collect results from all tasks
-            page_queries = [task.result() for task in page_tasks]
-
-            logger.info(f"Collected {len(page_queries)} page queries for {doc_id}")
-            
-            manifest["documents"].append({
+            return {
                 "doc_id": doc_id,
-                "pages": page_count,
-                "page_queries": [f"s3://{S3_BUCKET}/{key}" for key in page_queries],
-            })
+                #"pages": page_count,
+                "path": query_key,
+            }
+        
+        # Process all PDFs in parallel
+        try:
+            results = await asyncio.gather(*[process_pdf(pdf_file) for pdf_file in pdfs])
+            manifest["documents"].extend(results)
+        except Exception as e:
+            logger.error(f"Error processing PDFs: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     # enqueue RunPod serverless job (non-blocking)
     logger.info(f"Enqueuing RunPod job for manifest: {manifest_id}")
+
+    return JSONResponse({
+        "input": {
+            "id": manifest_id,
+            "manifest": manifest
+        }
+    })
     
     run_request = endpoint.run({
         "input": {
@@ -160,41 +177,6 @@ async def results(job_id: str):
     except Exception as e:
         logger.error(f"Error getting results for {job_id}: {e}")
         return JSONResponse({"error": f"Could not get results for {job_id}"}, status_code=500)
-
-
-# Updated process_page function to use a semaphore
-async def process_page(pdf_path, page_num, job_id, doc_id, bucket, semaphore):
-    async with semaphore:  # Acquire semaphore before processing, release after
-        
-        # Build page query
-        query = await build_page_query(
-            str(pdf_path), 
-            page_num, 
-            TARGET_LONGEST_IMAGE_DIM, 
-            TARGET_ANCHOR_TEXT_LEN
-        )
-
-        # separately get raw anchor text
-        page_report = await asyncio.to_thread(_pdf_report, str(pdf_path), page_num)
-        page_report_dict = asdict(page_report)
-
-        # prepare payload
-        payload = {
-            "query": query,
-            "page_report": page_report_dict
-        }
-        
-        # Store the complete query result in S3
-        query_key = f"jobs/{job_id}/queries/{doc_id}/page_{page_num:04}.json"
-        s3.put_object(
-            Bucket=bucket, 
-            Key=query_key, 
-            Body=json.dumps(payload).encode(),
-            ContentType="application/json"
-        )
-        
-        logger.info(f"Processed {doc_id} page {page_num}")
-        return query_key
     
 
 if __name__ == "__main__":
