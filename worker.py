@@ -12,7 +12,7 @@ from botocore.config import Config
 from olmocr.check import check_sglang_version, check_torch_gpu_available, check_poppler_version
 from olmocr.prompts import PageResponse, build_finetuning_prompt
 from olmocr.prompts.anchor import PageReport, _linearize_pdf_report
-from olmocr.s3_utils import parse_s3_path
+from olmocr.s3_utils import parse_s3_path, expand_s3_glob
 from olmocr.work_queue import S3WorkQueue
 from pipeline_utility import PageResult, download_model, sglang_server_ready, sglang_server_host, apost, build_dolma_document, metrics_reporter, worker, process_pool
 
@@ -115,16 +115,20 @@ async def handler(job):
 
     logger.info(f"Processing job {job_id}")
 
+    work_queue = S3WorkQueue(s3, s3_workspace)
+
+    pdf_work_paths = set()
     page_counts = []
     for doc in manifest["documents"]:
         page_counts.append(doc["pages"])
+        pdf_work_paths |= set(expand_s3_glob(s3, doc['path']))
+
     avg_pages_per_pdf = sum(page_counts) / len(page_counts)
     items_per_group = max(1, int(NUM_PAGES_PER_GROUP / avg_pages_per_pdf))
 
     logger.info(f"Found {len(manifest['documents']):,} documents with an average of {avg_pages_per_pdf:.2f} pages per document")
 
-    work_queue = S3WorkQueue(s3, s3_workspace)
-    await work_queue.populate_queue([doc['path'] for doc in manifest["documents"]], items_per_group)
+    await work_queue.populate_queue(pdf_work_paths, items_per_group)
 
     logger.info(f"Work queue populated")
 
