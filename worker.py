@@ -117,7 +117,7 @@ async def handler(job):
 
     page_counts = []
     for doc in manifest["documents"]:
-        page_counts.append(len(doc["pages"]))
+        page_counts.append(doc["pages"])
     avg_pages_per_pdf = sum(page_counts) / len(page_counts)
     items_per_group = max(1, int(NUM_PAGES_PER_GROUP / avg_pages_per_pdf))
 
